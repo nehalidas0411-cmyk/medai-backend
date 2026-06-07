@@ -1,10 +1,10 @@
 import os, base64, json, re, io
 from fastapi import APIRouter, UploadFile, File, HTTPException
 from pypdf import PdfReader
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 
-genai.configure(api_key=os.environ["GEMINI_API_KEY"])
-model = genai.GenerativeModel("gemini-1.5-flash")
+client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
 
 router = APIRouter()
 
@@ -38,7 +38,7 @@ def safe_json(text: str) -> dict:
                 "explanation": text[:400], "findings": [], "diagnosis": [],
                 "recommendation": "Please consult a doctor.", "urgency": "routine", "confidence": "low"}
 
-@app.post("/analyze")  # will be /api/analyze due to prefix
+@router.post("/analyze")
 async def analyze_report(
     file: UploadFile = File(...),
     age: str = None, sex: str = None,
@@ -54,24 +54,33 @@ async def analyze_report(
     if known_conditions: extra += f"\nKnown conditions/medications: {known_conditions}"
 
     is_image = file.content_type and file.content_type.startswith("image/")
-    is_pdf = file.content_type == "application/pdf" or file.filename.lower().endswith(".pdf")
+    is_pdf = (file.content_type == "application/pdf") or (file.filename or "").lower().endswith(".pdf")
 
     try:
         if is_image:
-            img_part = {"mime_type": file.content_type, "data": base64.b64encode(content).decode()}
-            response = model.generate_content([SYSTEM_PROMPT + extra, img_part])
+            img_part = types.Part.from_bytes(data=content, mime_type=file.content_type)
+            response = client.models.generate_content(
+                model="gemini-1.5-flash",
+                contents=[SYSTEM_PROMPT + extra, img_part]
+            )
         elif is_pdf:
             text = extract_pdf_text(content)
-            response = model.generate_content(f"{SYSTEM_PROMPT}{extra}\n\nReport text:\n{text}")
+            response = client.models.generate_content(
+                model="gemini-1.5-flash",
+                contents=f"{SYSTEM_PROMPT}{extra}\n\nReport text:\n{text}"
+            )
         else:
             try:
                 text = content.decode("utf-8")[:8000]
             except:
                 text = "[Binary file]"
-            response = model.generate_content(f"{SYSTEM_PROMPT}{extra}\n\nReport:\n{text}")
+            response = client.models.generate_content(
+                model="gemini-1.5-flash",
+                contents=f"{SYSTEM_PROMPT}{extra}\n\nReport:\n{text}"
+            )
 
         result = safe_json(response.text)
     except Exception as e:
-        raise HTTPException(500, f"AI error: {str(e)}. Make sure the backend is running at https://medai-backend-y1ax.onrender.com")
+        raise HTTPException(500, f"AI error: {str(e)}")
 
     return {**result, "disclaimer": DISCLAIMER}
