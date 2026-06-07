@@ -26,3 +26,11 @@ def root():
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+@app.get("/debug/models")
+async def list_models():
+    from google import genai
+    import os
+    client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+    models = client.models.list()
+    return {"models": [m.name for m in models]}
