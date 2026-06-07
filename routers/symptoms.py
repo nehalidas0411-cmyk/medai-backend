@@ -2,10 +2,9 @@ import os, json, re
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from typing import List, Optional
-from google import genai
+from groq import Groq
 
-client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
-
+client = Groq(api_key=os.environ["GROQ_API_KEY"])
 router = APIRouter()
 
 class SymptomRequest(BaseModel):
@@ -16,10 +15,9 @@ class SymptomRequest(BaseModel):
     severity: Optional[str] = None
     additional_notes: Optional[str] = None
 
-DISCLAIMER = ("⚠️ MEDICAL DISCLAIMER: This symptom analysis is for informational purposes only. "
-               "Always consult a qualified doctor for proper diagnosis and treatment.")
+DISCLAIMER = "⚠️ MEDICAL DISCLAIMER: This symptom analysis is for informational purposes only. Always consult a qualified doctor for proper diagnosis and treatment."
 
-PROMPT = """You are a differential diagnosis assistant. Given the patient's symptoms, respond ONLY with valid JSON:
+SYSTEM_PROMPT = """You are a differential diagnosis assistant. Respond ONLY with valid JSON:
 {
   "summary": "1-2 sentence overview",
   "diagnoses": [
@@ -44,16 +42,20 @@ def safe_json(text):
 async def check_symptoms(data: SymptomRequest):
     if not data.symptoms:
         raise HTTPException(400, "Please provide at least one symptom.")
-    prompt = (f"{PROMPT}\n\nPatient: {data.age} year old {data.sex}\n"
+    prompt = (f"Patient: {data.age} year old {data.sex}\n"
               f"Symptoms: {', '.join(data.symptoms)}\nDuration: {data.duration}")
-    if data.severity: prompt += f"\nSeverity (1-10): {data.severity}"
+    if data.severity: prompt += f"\nSeverity: {data.severity}/10"
     if data.additional_notes: prompt += f"\nNotes: {data.additional_notes}"
     try:
-        response = client.models.generate_content(
-            model="models/gemini-2.0-flash",
-            contents=prompt
+        response = client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": prompt}
+            ],
+            max_tokens=2000
         )
-        result = safe_json(response.text)
+        result = safe_json(response.choices[0].message.content)
     except Exception as e:
         raise HTTPException(500, f"AI error: {str(e)}")
     return {**result, "disclaimer": DISCLAIMER}
