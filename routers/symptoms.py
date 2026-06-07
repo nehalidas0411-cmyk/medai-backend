@@ -2,10 +2,9 @@ import os, json, re
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from typing import List, Optional
-import google.generativeai as genai
+from google import genai
 
-genai.configure(api_key=os.environ["GEMINI_API_KEY"])
-model = genai.GenerativeModel("gemini-1.5-flash")
+client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
 
 router = APIRouter()
 
@@ -50,7 +49,10 @@ async def check_symptoms(data: SymptomRequest):
     if data.severity: prompt += f"\nSeverity (1-10): {data.severity}"
     if data.additional_notes: prompt += f"\nNotes: {data.additional_notes}"
     try:
-        response = model.generate_content(prompt)
+        response = client.models.generate_content(
+            model="gemini-1.5-flash",
+            contents=prompt
+        )
         result = safe_json(response.text)
     except Exception as e:
         raise HTTPException(500, f"AI error: {str(e)}")
