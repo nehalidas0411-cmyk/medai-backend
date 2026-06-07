@@ -1,14 +1,12 @@
 import os, base64, json, re, io
 from fastapi import APIRouter, UploadFile, File, HTTPException
 from pypdf import PdfReader
-from google import genai
-from google.genai import types
+from groq import Groq
 
-client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
-
+client = Groq(api_key=os.environ["GROQ_API_KEY"])
 router = APIRouter()
 
-SYSTEM_PROMPT = """You are MedAI, a medical report interpreter. Analyze the given medical report or image and respond ONLY with valid JSON, no markdown, no extra text:
+SYSTEM_PROMPT = """You are MedAI, a medical report interpreter. Analyze the given medical report and respond ONLY with valid JSON, no markdown:
 {
   "report_type": "e.g. Chest X-Ray / ECG / Blood CBC",
   "report_category": "radiology/cardiology/neurology/pathology/hematology/other",
@@ -20,8 +18,7 @@ SYSTEM_PROMPT = """You are MedAI, a medical report interpreter. Analyze the give
   "confidence": "low/medium/high"
 }"""
 
-DISCLAIMER = ("⚠️ MEDICAL DISCLAIMER: This AI analysis is for informational purposes only and does NOT "
-               "constitute medical advice, diagnosis, or treatment. Always consult a qualified healthcare professional.")
+DISCLAIMER = "⚠️ MEDICAL DISCLAIMER: This AI analysis is for informational purposes only and does NOT constitute medical advice, diagnosis, or treatment. Always consult a qualified healthcare professional."
 
 def extract_pdf_text(content: bytes) -> str:
     try:
@@ -51,35 +48,44 @@ async def analyze_report(
     extra = ""
     if age: extra += f"\nPatient age: {age}"
     if sex: extra += f"\nBiological sex: {sex}"
-    if known_conditions: extra += f"\nKnown conditions/medications: {known_conditions}"
+    if known_conditions: extra += f"\nKnown conditions: {known_conditions}"
 
     is_image = file.content_type and file.content_type.startswith("image/")
     is_pdf = (file.content_type == "application/pdf") or (file.filename or "").lower().endswith(".pdf")
 
     try:
         if is_image:
-            img_part = types.Part.from_bytes(data=content, mime_type=file.content_type)
-            response = client.models.generate_content(
-                model="models/gemini-2.0-flash",
-                contents=[SYSTEM_PROMPT + extra, img_part]
-            )
-        elif is_pdf:
-            text = extract_pdf_text(content)
-            response = client.models.generate_content(
-                model="models/gemini-2.0-flash",
-                contents=f"{SYSTEM_PROMPT}{extra}\n\nReport text:\n{text}"
+            b64 = base64.b64encode(content).decode()
+            mime = file.content_type
+            response = client.chat.completions.create(
+                model="meta-llama/llama-4-scout-17b-16e-instruct",
+                messages=[
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": [
+                        {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}},
+                        {"type": "text", "text": f"Analyze this medical report image.{extra}"}
+                    ]}
+                ],
+                max_tokens=2000
             )
         else:
-            try:
-                text = content.decode("utf-8")[:8000]
-            except:
-                text = "[Binary file]"
-            response = client.models.generate_content(
-                model="models/gemini-2.0-flash",
-                contents=f"{SYSTEM_PROMPT}{extra}\n\nReport:\n{text}"
+            if is_pdf:
+                text = extract_pdf_text(content)
+            else:
+                try:
+                    text = content.decode("utf-8")[:8000]
+                except:
+                    text = "[Binary file]"
+            response = client.chat.completions.create(
+                model="llama-3.3-70b-versatile",
+                messages=[
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": f"Analyze this medical report:{extra}\n\n{text}"}
+                ],
+                max_tokens=2000
             )
 
-        result = safe_json(response.text)
+        result = safe_json(response.choices[0].message.content)
     except Exception as e:
         raise HTTPException(500, f"AI error: {str(e)}")
 
