@@ -2,11 +2,10 @@ import json, re, os
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from typing import Optional, List
-import google.generativeai as genai
+from google import genai
 
 router = APIRouter()
-genai.configure(api_key=os.environ["GEMINI_API_KEY"])
-model = genai.GenerativeModel("gemini-2.5-flash")
+client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
 
 SYMPTOM_SYSTEM_PROMPT = """You are a differential diagnosis assistant for educational purposes.
 When given symptoms and patient context, produce a structured analysis.
@@ -88,7 +87,10 @@ async def check_symptoms(req: SymptomRequest):
     prompt = SYMPTOM_SYSTEM_PROMPT + "\n\n" + "\n".join(parts) + "\n\nProvide differential diagnosis in the required JSON format."
 
     try:
-        response = model.generate_content(prompt)
+        response = client.models.generate_content(
+            model="gemini-2.0-flash",
+            contents=prompt
+        )
         result = safe_json_parse(response.text)
         if emergency and not result.get("emergency_warning"):
             result["emergency_warning"] = emergency

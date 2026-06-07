@@ -1,11 +1,11 @@
 import json, base64, re, io, os
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException
 from typing import Optional
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 
 router = APIRouter()
-genai.configure(api_key=os.environ["GEMINI_API_KEY"])
-model = genai.GenerativeModel("gemini-2.5-flash")
+client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
 
 SYSTEM_PROMPT = """You are an expert medical report interpreter. When given a medical image 
 (X-ray, ECG, EEG, EMG, EOG, MRI, CT, ultrasound) or a medical text report (lab results, 
@@ -35,7 +35,7 @@ def extract_pdf_text(content: bytes) -> str:
         text = ""
         for page in reader.pages:
             text += page.extract_text() + "\n"
-        return text.strip() if text.strip() else "[PDF appears to be scanned/image-only — no text extracted]"
+        return text.strip() if text.strip() else "[PDF appears to be scanned/image-only]"
     except Exception as e:
         return f"[Could not extract PDF text: {e}]"
 
@@ -53,7 +53,7 @@ def safe_json_parse(raw: str) -> dict:
                 pass
     return {
         "explanation": raw,
-        "findings": ["Could not parse structured findings — see explanation above."],
+        "findings": ["Could not parse structured findings."],
         "diagnosis": "Unable to determine — please consult a doctor.",
         "recommendation": "Please see a qualified medical professional.",
         "urgency": "routine",
@@ -91,15 +91,23 @@ async def analyze_report(
         if file.content_type == "application/pdf":
             pdf_text = extract_pdf_text(content)
             prompt = f"{SYSTEM_PROMPT}\n\n{context}\n\nMedical Report Text:\n{pdf_text}" if context else f"{SYSTEM_PROMPT}\n\nMedical Report Text:\n{pdf_text}"
-            response = model.generate_content(prompt)
+            response = client.models.generate_content(
+                model="gemini-2.0-flash",
+                contents=prompt
+            )
         else:
-            import PIL.Image
-            img = PIL.Image.open(io.BytesIO(content))
+            media_type = file.content_type if file.content_type in ["image/jpeg","image/png","image/gif","image/webp"] else "image/jpeg"
             prompt_text = SYSTEM_PROMPT
             if context:
                 prompt_text += f"\n\nPatient context:\n{context}"
             prompt_text += "\n\nAnalyze this medical image and provide findings in the required JSON format."
-            response = model.generate_content([prompt_text, img])
+            response = client.models.generate_content(
+                model="gemini-2.0-flash",
+                contents=[
+                    prompt_text,
+                    types.Part.from_bytes(data=content, mime_type=media_type)
+                ]
+            )
 
         raw = response.text
         result = safe_json_parse(raw)
