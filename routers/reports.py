@@ -60,13 +60,13 @@ async def analyze_report(
         if is_image:
             img_part = types.Part.from_bytes(data=content, mime_type=file.content_type)
             response = client.models.generate_content(
-                model="gemini-1.5-flash-latest",
+                model="models/gemini-1.5-flash",
                 contents=[SYSTEM_PROMPT + extra, img_part]
             )
         elif is_pdf:
             text = extract_pdf_text(content)
             response = client.models.generate_content(
-                model="gemini-1.5-flash-latest",
+                model="models/gemini-1.5-flash",
                 contents=f"{SYSTEM_PROMPT}{extra}\n\nReport text:\n{text}"
             )
         else:
@@ -75,7 +75,7 @@ async def analyze_report(
             except:
                 text = "[Binary file]"
             response = client.models.generate_content(
-                model="gemini-1.5-flash-latest",
+                model="models/gemini-1.5-flash",
                 contents=f"{SYSTEM_PROMPT}{extra}\n\nReport:\n{text}"
             )
 
