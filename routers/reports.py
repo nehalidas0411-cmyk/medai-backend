@@ -1,117 +1,77 @@
-import json, base64, re, io, os
-from fastapi import APIRouter, UploadFile, File, Form, HTTPException
-from typing import Optional
-from google import genai
-from google.genai import types
+import os, base64, json, re, io
+from fastapi import APIRouter, UploadFile, File, HTTPException
+from pypdf import PdfReader
+import google.generativeai as genai
+
+genai.configure(api_key=os.environ["GEMINI_API_KEY"])
+model = genai.GenerativeModel("gemini-1.5-flash")
 
 router = APIRouter()
-client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
 
-SYSTEM_PROMPT = """You are an expert medical report interpreter. When given a medical image 
-(X-ray, ECG, EEG, EMG, EOG, MRI, CT, ultrasound) or a medical text report (lab results, 
-discharge summary, etc.), you must:
-
-1. Explain ALL findings in simple, clear, patient-friendly language
-2. List every key finding or abnormality as a separate item
-3. Suggest the 2-4 most likely diagnoses based ONLY on what is in the report
-4. Recommend what type of specialist or next step is appropriate
-5. Note any urgent or emergency findings prominently
-
-Respond ONLY with valid JSON, no markdown, no code fences:
+SYSTEM_PROMPT = """You are MedAI, a medical report interpreter. Analyze the given medical report or image and respond ONLY with valid JSON, no markdown, no extra text:
 {
-  "explanation": "A 2-4 paragraph plain-language explanation",
-  "findings": ["Finding 1", "Finding 2", "Finding 3"],
-  "diagnosis": "Most likely condition or differential diagnosis list",
-  "recommendation": "Who to see and what to do next",
-  "urgency": "routine | soon | urgent | emergency",
-  "disclaimer": "This is AI-generated analysis for educational purposes only. Not a medical diagnosis. Always consult a qualified physician."
+  "report_type": "e.g. Chest X-Ray / ECG / Blood CBC",
+  "report_category": "radiology/cardiology/neurology/pathology/hematology/other",
+  "explanation": "3-5 sentences in plain patient-friendly language",
+  "findings": [{"item": "name", "value": "value", "status": "normal/abnormal/borderline", "note": "brief explanation"}],
+  "diagnosis": [{"condition": "name", "likelihood": "possible/likely/highly likely", "explanation": "1-2 sentences"}],
+  "recommendation": "which specialist to see and urgency",
+  "urgency": "routine/soon/urgent/emergency",
+  "confidence": "low/medium/high"
 }"""
 
+DISCLAIMER = ("⚠️ MEDICAL DISCLAIMER: This AI analysis is for informational purposes only and does NOT "
+               "constitute medical advice, diagnosis, or treatment. Always consult a qualified healthcare professional.")
 
 def extract_pdf_text(content: bytes) -> str:
     try:
-        import pypdf
-        reader = pypdf.PdfReader(io.BytesIO(content))
-        text = ""
-        for page in reader.pages:
-            text += page.extract_text() + "\n"
-        return text.strip() if text.strip() else "[PDF appears to be scanned/image-only]"
-    except Exception as e:
-        return f"[Could not extract PDF text: {e}]"
+        reader = PdfReader(io.BytesIO(content))
+        return "\n".join(p.extract_text() or "" for p in reader.pages)[:8000]
+    except:
+        return "[Could not extract PDF text]"
 
-
-def safe_json_parse(raw: str) -> dict:
-    raw = re.sub(r"```(?:json)?", "", raw).strip()
+def safe_json(text: str) -> dict:
     try:
-        return json.loads(raw)
-    except json.JSONDecodeError:
-        match = re.search(r"\{.*\}", raw, re.DOTALL)
-        if match:
-            try:
-                return json.loads(match.group())
-            except Exception:
-                pass
-    return {
-        "explanation": raw,
-        "findings": ["Could not parse structured findings."],
-        "diagnosis": "Unable to determine — please consult a doctor.",
-        "recommendation": "Please see a qualified medical professional.",
-        "urgency": "routine",
-        "disclaimer": "This is AI-generated analysis for educational purposes only."
-    }
+        return json.loads(re.sub(r"```json\s*|\s*```", "", text).strip())
+    except:
+        return {"report_type": "Unknown", "report_category": "other",
+                "explanation": text[:400], "findings": [], "diagnosis": [],
+                "recommendation": "Please consult a doctor.", "urgency": "routine", "confidence": "low"}
 
-
-@router.post("/analyze")
+@app.post("/analyze")  # will be /api/analyze due to prefix
 async def analyze_report(
     file: UploadFile = File(...),
-    age: Optional[str] = Form(None),
-    sex: Optional[str] = Form(None),
-    report_type: Optional[str] = Form(None),
-    known_conditions: Optional[str] = Form(None),
+    age: str = None, sex: str = None,
+    report_type: str = None, known_conditions: str = None
 ):
-    allowed_types = {
-        "image/jpeg", "image/jpg", "image/png", "image/webp",
-        "image/gif", "application/pdf"
-    }
-    if file.content_type not in allowed_types:
-        raise HTTPException(status_code=400, detail=f"Unsupported file type: {file.content_type}")
-
     content = await file.read()
     if len(content) > 15 * 1024 * 1024:
-        raise HTTPException(status_code=400, detail="File too large. Max 15 MB.")
+        raise HTTPException(413, "File too large (max 15MB)")
 
-    context_parts = []
-    if age:              context_parts.append(f"Patient age: {age}")
-    if sex:              context_parts.append(f"Patient biological sex: {sex}")
-    if report_type:      context_parts.append(f"Report type: {report_type}")
-    if known_conditions: context_parts.append(f"Known conditions/medications: {known_conditions}")
-    context = "\n".join(context_parts)
+    extra = ""
+    if age: extra += f"\nPatient age: {age}"
+    if sex: extra += f"\nBiological sex: {sex}"
+    if known_conditions: extra += f"\nKnown conditions/medications: {known_conditions}"
+
+    is_image = file.content_type and file.content_type.startswith("image/")
+    is_pdf = file.content_type == "application/pdf" or file.filename.lower().endswith(".pdf")
 
     try:
-        if file.content_type == "application/pdf":
-            pdf_text = extract_pdf_text(content)
-            prompt = f"{SYSTEM_PROMPT}\n\n{context}\n\nMedical Report Text:\n{pdf_text}" if context else f"{SYSTEM_PROMPT}\n\nMedical Report Text:\n{pdf_text}"
-            response = client.models.generate_content(
-                model="gemini-2.0-flash",
-                contents=prompt
-            )
+        if is_image:
+            img_part = {"mime_type": file.content_type, "data": base64.b64encode(content).decode()}
+            response = model.generate_content([SYSTEM_PROMPT + extra, img_part])
+        elif is_pdf:
+            text = extract_pdf_text(content)
+            response = model.generate_content(f"{SYSTEM_PROMPT}{extra}\n\nReport text:\n{text}")
         else:
-            media_type = file.content_type if file.content_type in ["image/jpeg","image/png","image/gif","image/webp"] else "image/jpeg"
-            prompt_text = SYSTEM_PROMPT
-            if context:
-                prompt_text += f"\n\nPatient context:\n{context}"
-            prompt_text += "\n\nAnalyze this medical image and provide findings in the required JSON format."
-            response = client.models.generate_content(
-                model="gemini-2.0-flash",
-                contents=[
-                    prompt_text,
-                    types.Part.from_bytes(data=content, mime_type=media_type)
-                ]
-            )
+            try:
+                text = content.decode("utf-8")[:8000]
+            except:
+                text = "[Binary file]"
+            response = model.generate_content(f"{SYSTEM_PROMPT}{extra}\n\nReport:\n{text}")
 
-        raw = response.text
-        result = safe_json_parse(raw)
-        return result
-
+        result = safe_json(response.text)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"AI error: {str(e)}")
+        raise HTTPException(500, f"AI error: {str(e)}. Make sure the backend is running at https://medai-backend-y1ax.onrender.com")
+
+    return {**result, "disclaimer": DISCLAIMER}
