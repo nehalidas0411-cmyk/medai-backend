@@ -50,7 +50,7 @@ async def check_symptoms(data: SymptomRequest):
     if data.additional_notes: prompt += f"\nNotes: {data.additional_notes}"
     try:
         response = client.models.generate_content(
-            model="gemini-2.0-flash",
+            model="gemini-1.5-flash-latest",
             contents=prompt
         )
         result = safe_json(response.text)
